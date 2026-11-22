@@ -1,180 +1,135 @@
-# AI-Based Smart Home Automation System
+# GA01 — Virtual Network Framework (VyOS · IS-IS · OpenDaylight · iBGP)
 
-An ESP32 smart-home prototype that switches a **12 V light** and a **12 V fan** only when the room needs them. It uses rule-based control, a **Decision Tree trained on real logged data that runs on the microcontroller itself**, and a live **React + Firebase** dashboard.
+A four-router service-provider-style lab built in **GNS3** on a single 16 GB Windows PC. The four **VyOS** routers run **IS-IS** across five core links. An **OpenDaylight** controller on Ubuntu Server peers with R1 over **iBGP on TCP 1790**, using a separate management LAN. The lab was tested with a controlled link failure, and extended with traffic shaping, SNMP monitoring, a live Python dashboard and IS-IS traffic-engineering attributes.
 
-> Final-year design project · Industrial Computing Design Project 3 (DES371S) · BEngTech Computer Engineering · Cape Peninsula University of Technology, 2026
+> Built by **Lekgothe Ngoepe** for the CPUT *Network Systems 3 (NSS370S)* GA1 project, November 2026.
+> Addressing uses the personal allocation code **S = 103**.
 
-![Completed prototype](docs/images/prototype.jpg)
+![Architecture](images/architecture.png)
 
-## Results at a glance
+---
+
+## Highlights
 
 | | |
 |---|---|
-| Functional tests | **12 / 12 passed** (Auto, AI, Manual, Off, offline) |
-| Light model accuracy (unseen data) | **97.0 %**, equal to the rule-based system |
-| Energy saving (1-hour test) | **75 %** compared with leaving both loads on |
-| Command response time | **2.39 s** average, dashboard click → relay click |
-| Hardware cost | **R310** |
+| Routing | IS-IS, one area (49.0001), point-to-point /30 links, passive loopbacks, ECMP |
+| Controller | OpenDaylight 0.20.3 (Karaf, Java 17, BGPCEP), configured entirely through RESTCONF |
+| BGP | iBGP AS 65002, R1 ↔ ODL on TCP 1790. ODL is passive and R1 opens the session. R1's loopback is verified in ODL's Loc-RIB |
+| Resilience | R1–R2 link failed on purpose. Traffic rerouted via R3 and BGP stayed up throughout |
+| Extras | 10 Mbit/s shaper + UDP ramp test, SNMPv2c, live topology dashboard, IS-IS TE TLVs |
 
-## How it works
+## Platform
 
-![Block diagram](docs/images/block-diagram.png)
+- **Host:** Windows, GNS3 GUI and Oracle VirtualBox.
+- **GNS3 VM:** QEMU running four VyOS **1.5-stream-2025-Q2** routers (FRR 9.1.3).
+- **Controller:** Ubuntu Server 24.04.5 VM (4 GB RAM, 2 vCPU) running OpenDaylight 0.20.3.
+  - enp0s8: host-only, `192.168.103.10/24`
+  - enp0s3: NAT, used only for package downloads
+- **Management LAN:** VirtualBox host-only network `192.168.103.0/24`. R1 eth4 joins it through a GNS3 Cloud node.
 
-- **Sensors:** DHT22 (temperature and humidity), an LDR (light level) and a PIR HC-SR501 (motion).
-- **Controller:** an ESP32 DevKit V1 makes **every decision locally**, so the system keeps working when Wi-Fi drops.
-- **Actuators:** a 2-channel relay (SRD-05VDC-SL-C) switches a 12 V DC fan (0.12 A) and a 12 V 3 W bulb, with the 12 V side isolated from the ESP32.
-- **Cloud:** a Firebase Realtime Database with email/password authentication.
-- **Dashboard:** React, with live readings, four modes, manual switches, an AI-vs-rules comparison, editable settings and a test-recording panel.
+## Topology and addressing
 
-### Operating modes
+The four routers form a ring (R1–R2–R3–R4) plus a diagonal R1–R3, so every router has at least two paths.
 
-| Mode | Light | Fan |
-|---|---|---|
-| **Auto** | ON when motion was seen in the last 10 s **and** the room is dark | ON at ≥ 29 °C, OFF at ≤ 28 °C (hysteresis) |
-| **AI** | Trained Decision Tree (ON at p ≥ 0.60, OFF at p ≤ 0.40) | Rules (the fan model was not accurate enough, see below) |
-| **Manual** | Dashboard switch | Dashboard switch |
-| **Off** | OFF | OFF |
+![GNS3 topology](images/gns3-topology.png)
 
-Reliability details:
-- The LDR is only trusted as "ambient light" while the bulb is off, so the bulb can't switch itself off.
-- In Manual mode, if the dashboard can't be reached for 2 minutes, the ESP32 falls back to the rules.
-- If the DHT22 data goes stale, the fan switches off.
-- Relay states are re-sent every 5 s.
+| Link | Subnet | Side A | Side B |
+|---|---|---|---|
+| R1–R2 | 10.103.0.0/30 | R1 eth5 .1 | R2 eth5 .2 |
+| R2–R3 | 10.103.0.4/30 | R2 eth7 .5 | R3 eth7 .6 |
+| R3–R4 | 10.103.0.8/30 | R3 eth5 .9 | R4 eth7 .10 |
+| R1–R4 | 10.103.0.12/30 | R1 eth6 .13 | R4 eth5 .14 |
+| R1–R3 | 10.103.0.16/30 | R1 eth7 .17 | R3 eth6 .18 |
+| Loopbacks | /32 | R1 10.103.0.201 · R2 .202 | R3 .203 · R4 .204 |
+| Management | 192.168.103.0/24 | Host .1 · GNS3 VM .101 | ODL .10 · R1 eth4 .11 |
 
-> The thresholds are editable live from the dashboard (`/settings`). The code defaults are 27 °C / 26 °C; the tests above used 29 °C / 28 °C.
+> **Why eth4–eth7 and not eth0–eth3?** VyOS ties each interface name to a MAC address (`hw-id`). The routers were reused from an earlier project, so GNS3 ports e0–e3 appear as eth4–eth7, and not in port order. The last byte of each MAC gives the real GNS3 port number. Checking this mapping is what fixed the project's biggest fault (see [docs/troubleshooting.md](docs/troubleshooting.md)).
 
-![Dashboard and Serial Monitor showing the same reading](docs/images/dashboard-and-serial.png)
-
-## The machine-learning part
-
-The model **learns the user's preferences** instead of following thresholds the designer typed in:
-
-1. In **Manual** mode the user acts as the room's occupant and switches the light and fan. Every 30 s the ESP32 logs the conditions together with the user's choice to `/logs`.
-2. `ml/export_firebase_logs.py` downloads the logs and saves them as a CSV.
-3. `ml/train_model.py` trains a scikit-learn `DecisionTreeClassifier` (max depth 4, min 5 samples per leaf). It splits the data **by time** (train on the past, test on the future), compares the model with the rules, and **generates C code** (`firmware/SmartHome_ESP32/model.h`).
-4. The sketch is re-uploaded, and the tree runs **on the ESP32**, offline.
-
-**Dataset:** a one-hour session, 129 rows (96 for training, 33 for testing). Features: temperature, humidity, ambient light, motion and hour of day.
-
-| Model | Decision Tree | Rule-based |
-|---|---|---|
-| Light | **97.0 %** | 97.0 % |
-| Fan | 57.6 % | **87.9 %** |
-
-<p>
-<img src="docs/images/light-decision-tree.png" width="49%" alt="Learned light tree">
-<img src="docs/images/confusion-matrices.png" width="49%" alt="Confusion matrices">
-</p>
-
-The light tree learned "someone is present **and** it is dark (ambient < ~1390)" from the data by itself.
-
-The fan model was weak for two reasons:
-- Between 28 °C and 29 °C, the right answer depends on whether the room is heating or cooling, and a memoryless tree can't see that (the rules handle it with hysteresis).
-- One hour contained few fan switching events.
-
-So **AI mode uses the model for the light and the rules for the fan.** That is an engineering decision based on the measured results.
-
-![AI mode running on the ESP32](docs/images/ai-mode.png)
-
-## Repository structure
+## Repository layout
 
 ```
-firmware/SmartHome_ESP32/   ESP32 sketch (Arduino IDE)
-  SmartHome_ESP32.ino       sensors, 4 modes, failsafe, Firebase, logging
-  model.h                   Decision Tree generated by ml/train_model.py
-  secrets.example.h         template for your Wi-Fi + Firebase credentials
-dashboard/                  React web dashboard (create-react-app)
-ml/                         export logs, train + evaluate, energy report
-docs/images/                diagrams, screenshots and results
+configs/vyos/          R1–R4 configuration commands, Feature A shaper, Feature D vtysh block
+configs/opendaylight/  RESTCONF XML (BGP instance, peer acceptor, R1 neighbour) + apply.sh
+dashboard/             ga01_dashboard.py — live SNMP + RESTCONF topology dashboard
+docs/                  troubleshooting log
+images/                screenshots from the running lab
 ```
 
-### Firebase database
+## Results
 
-| Path | Written by | Contents |
+### Routing
+
+On R1, all three IS-IS neighbours are Up. The other loopbacks are learned as `I>*` routes at metric 20. Loopback-sourced pings to every router have 0% loss.
+
+![R1 IS-IS routes](images/r1-isis-routes.png)
+
+### OpenDaylight ↔ R1 BGP
+
+All three RESTCONF PUTs returned **HTTP 201**. R1 shows **Established** with PfxSnt 1, and the session was seen up for 2 h 40 min. The hold time is 90 s: R1 is set to 180 and ODL to 90, and BGP uses the lower value. ODL's Loc-RIB contains `10.103.0.201/32` with next hop `192.168.103.11`.
+
+![BGP established](images/r1-bgp-established.png)
+![ODL loc-rib](images/odl-loc-rib.png)
+
+### Controlled link failure (R1 eth5, the R1–R2 link, disabled)
+
+| Check | Predicted | Observed |
 |---|---|---|
-| `/sensors` | ESP32 (every 5 s) | temperature, humidity, light, ambientLight, motion, reading number |
-| `/status` | ESP32 (every 5 s) | mode, actual relay states, rule vs AI decisions, AI confidence, lastSeen |
-| `/control` | Dashboard | mode and manual fan/light commands (ESP32 reads every 3 s) |
-| `/settings` | Dashboard | fan thresholds, dark threshold, light hold time (ESP32 reads every 30 s) |
-| `/logs` | ESP32 (every 30 s) | training rows: conditions + decisions |
-| `/tests` | Dashboard | recorded test results with reading number |
+| R1 → 10.103.0.202 | Moves from eth5 (metric 20, 1 hop) to via R3 (metric 30, 2 hops) | via 10.103.0.18 eth7, metric 30 ✔ |
+| R2 outage | Up to about 30 s (IS-IS hold time) | **28 of 86** pings lost (≈ 28 s), TTL 64 → 63 ✔ |
+| BGP to ODL | Stays up (it runs on the management LAN) | Still Established ✔ |
+| After restore | Back to eth5, metric 20 | 84/84 pings, 0% loss ✔ |
 
-Requests (`/control`) are kept separate from the real relay states (`/status`), so the dashboard and the ESP32 never overwrite each other.
+R2 only rerouted after its hold timer expired. In GNS3, disabling R1's side does not drop R2's side of the link. Lower hello timers or BFD would shorten the outage.
 
-## Hardware and wiring
+| Before / during | R2 continuous ping | Restored |
+|---|---|---|
+| ![](images/fault-r1-before-during.png) | ![](images/fault-r2-continuous-ping.png) | ![](images/fault-r1-restored.png) |
 
-![Wiring diagram](docs/images/wiring-diagram.png)
+## Advanced features
 
-| Part | ESP32 pin |
+| Feature | Result |
 |---|---|
-| DHT22 data | GPIO27 |
-| LDR divider junction (3.3 V → LDR → pin → 10 kΩ → GND) | GPIO34 (ADC1) |
-| PIR output (PIR powered from 5 V) | GPIO13 |
-| Relay IN1 → fan (active-LOW) | GPIO26 |
-| Relay IN2 → light (active-LOW) | GPIO25 |
-| Green LED: online (blinks when offline) | GPIO33 |
-| Yellow/red LED: motion | GPIO32 |
+| **A. UDP ramp + shaper** | 10 Mbit/s shaper `GA01-LIMIT` on R1 eth5 egress, with iperf3 UDP from R1 to R2. Loss was 0% at 2 and 5 Mbit/s, under 0.1% at 8, about 9% at 10, and 24% at 12. The bottleneck is about **9.1 Mbit/s** |
+| **B. SNMP** | SNMPv2c read-only community `ga01ro`, restricted to the management subnet, on all four routers |
+| **C. Live dashboard** | [`dashboard/ga01_dashboard.py`](dashboard/ga01_dashboard.py), pure standard-library Python. It polls IF-MIB on all routers and the BGP state from ODL's Loc-RIB. A link counts as up only if both ends are up **and** frames arrived in the last 8 s, so a GNS3 link *Suspend* turns red |
+| **D. IS-IS TE** | Wide metrics and TE on all routers, plus `link-params` (max-bw / max-rsv-bw) on R1 eth5. R2 sees the new bandwidth TLVs in R1's LSP |
+| **E. BGP-LS** | Not possible: VyOS 1.5-stream-2025-Q2 offers no link-state address family (documented) |
 
-On the load side, +12 V goes to the relay **COM** terminals and the loads to **NO**, so the loads are off unless a relay is on. The 12 V ground is kept separate from the ESP32 ground.
+![Dashboard](images/dashboard.png)
+![Link suspended on the dashboard](images/dashboard-link-suspended.png)
 
-## Getting started
+| Feature A: receiver loss | Feature D: TE TLVs on R2 | Feature E: no link-state AF |
+|---|---|---|
+| ![](images/featureA-receiver-loss.png) | ![](images/featureD-te-lsp.png) | ![](images/featureE-no-bgp-ls.png) |
 
-### 1. Firebase
-1. Create a Firebase project with a **Realtime Database** and enable **Email/Password** authentication.
-2. Create two users: one for the ESP32 and one for the dashboard.
-3. Lock the database down to those two users. Replace the UIDs below with your own, found under Authentication → Users:
+## Reproduce
 
-```json
-{
-  "rules": {
-    ".read":  "auth != null && (auth.uid === 'ESP32_UID' || auth.uid === 'DASHBOARD_UID')",
-    ".write": "auth != null && (auth.uid === 'ESP32_UID' || auth.uid === 'DASHBOARD_UID')"
-  }
-}
-```
+1. **Routers:** on each router, run `configure`, paste `configs/vyos/Rx.conf`, then `compare`, `commit` and `save`. Check with `show isis neighbor`, `show ip route isis` and `ping 10.103.0.203 source-address 10.103.0.201`.
+2. **Controller:** on the Ubuntu Server:
+   ```bash
+   cd ~/opendaylight-0.20.3 && ./bin/karaf
+   # in Karaf:
+   feature:install odl-restconf odl-bgpcep-bgp
+   # in a second shell:
+   cd configs/opendaylight && ./apply.sh
+   ```
+3. **BGP:** on R1, run `show bgp summary`. If the state is `Active` because ODL was still starting, run `reset bgp 192.168.103.10`.
+4. **Dashboard:**
+   ```bash
+   # The host needs a route to the router loopbacks via R1, for example on Windows (admin):
+   route add 10.103.0.0 mask 255.255.255.0 192.168.103.11
+   python dashboard/ga01_dashboard.py --once   # single test poll
+   python dashboard/ga01_dashboard.py          # then open http://localhost:8090
+   ```
 
-### 2. Firmware (Arduino IDE)
-1. Install the **ESP32** board package, plus the **FirebaseClient by Mobizt (v2.2.13)** and **DHT sensor library (Adafruit)** libraries.
-2. Copy `firmware/SmartHome_ESP32/secrets.example.h` to `secrets.h` and fill in your values.
-3. Open `SmartHome_ESP32.ino`, choose **ESP32 Dev Module**, upload, and open the Serial Monitor at **115200** baud.
+## Lessons learned
 
-The sketch connects to WPA2-Enterprise (PEAP) Wi-Fi. For a home network, change `startWiFi()` to `WiFi.begin(WIFI_SSID, WIFI_PASSWORD)`.
+- On point-to-point links IS-IS can show a neighbour **Up** even when the two ends are in different subnets. Always check the adjacency, the route table and a ping together.
+- Keep the controller on a separate management LAN: the core failure test never touched the BGP session.
+- Ubuntu Desktop was too heavy for a 16 GB host running the whole lab. Ubuntu Server boots in about a minute and uses about 5% of its 4 GB.
+- The campus network blocked plain HTTP, so apt mirrors and the ODL download were switched to HTTPS.
 
-### 3. Dashboard
-```bash
-cd dashboard
-cp .env.example .env      # then fill in your Firebase web config
-npm install
-npm start                 # http://localhost:3000
-```
+## Tools
 
-### 4. Machine learning
-```bash
-cd ml
-pip install -r requirements.txt
-python export_firebase_logs.py     # downloads /logs -> data/sensor_logs.csv
-python train_model.py              # trains, evaluates, writes ../firmware/SmartHome_ESP32/model.h
-python energy_report.py            # energy used vs always-on
-```
-
-`make_test_data.py` creates clearly marked **synthetic** rows for testing the pipeline only. `train_model.py` refuses them unless you pass `--allow-synthetic`, and those results must never be reported.
-
-## Testing
-
-Twelve functional tests (T01 to T12) were recorded from the dashboard. Each one needed **both** an automatic check against the live ESP32 data **and** a physical observation of the real fan or bulb. Every upload carries a reading number, so the same values can be matched in the Serial Monitor, Firebase and the dashboard.
-
-![Recorded test results](docs/images/test-results.png)
-
-## Limitations and future work
-
-- **More training data:** several days instead of one hour. Adding the previous fan state as a feature should let the AI learn cooling as well as lighting.
-- **Better hardware:** a mobile app, a PCB instead of breadboards, and a current sensor so energy is measured directly instead of calculated from the logs.
-- **TLS:** the firmware uses `setInsecure()` (no certificate check). This is fine for a prototype, but production code should verify certificates.
-
-## Built with
-
-ESP32 · Arduino IDE (C++) · [FirebaseClient](https://github.com/mobizt/FirebaseClient) · [Adafruit DHT library](https://github.com/adafruit/DHT-sensor-library) · Firebase Realtime Database · React · Recharts · Python · scikit-learn · Google Colab
-
-## Author
-
-**Lekgothe Ngoepe**, Cape Peninsula University of Technology. Supervisor: Prof Ali Almaktoof.
+GNS3 · VirtualBox · VyOS 1.5 · FRR · OpenDaylight 0.20.3 (BGPCEP, RESTCONF) · Ubuntu Server 24.04 · iperf3 · Wireshark · Python 3
