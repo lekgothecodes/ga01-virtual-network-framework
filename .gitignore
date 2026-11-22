@@ -1,0 +1,21 @@
+# Credentials - never commit these
+firmware/**/secrets.h
+.env
+.env.*
+!.env.example
+
+# Dashboard build output and dependencies
+dashboard/node_modules/
+dashboard/build/
+
+# ML: raw logged data and generated output
+ml/data/
+ml/results/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/

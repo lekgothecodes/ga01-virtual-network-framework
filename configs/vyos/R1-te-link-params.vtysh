@@ -1,0 +1,15 @@
+# Advanced feature D (runtime only, FRR vtysh on R1) - re-enter after a reboot
+vtysh
+configure terminal
+interface eth5
+ link-params
+  enable
+  max-bw 125000000
+  max-rsv-bw 100000000
+ exit-link-params
+exit
+router isis VyOS
+ mpls-te on
+ mpls-te router-address 10.103.0.201
+end
+exit
